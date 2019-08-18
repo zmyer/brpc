@@ -1,6 +1,19 @@
-// Copyright (c) 2014 Baidu, Inc.
-// Author: Ge,Jun (gejun@baidu.com)
-// Date: Sun Jul 13 15:04:18 CST 2014
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <execinfo.h>
 #include <gtest/gtest.h>
@@ -407,7 +420,7 @@ TEST_F(BthreadTest, stop_sleep) {
     ASSERT_EQ(0, bthread_stop(th));
     ASSERT_EQ(0, bthread_join(th, NULL));
     tm.stop();
-    ASSERT_LE(abs(tm.m_elapsed() - 10), 5);
+    ASSERT_LE(labs(tm.m_elapsed() - 10), 10);
 }
 
 TEST_F(BthreadTest, bthread_exit) {
@@ -506,10 +519,16 @@ TEST_F(BthreadTest, too_many_nosignal_threads) {
         ASSERT_EQ(0, bthread_start_urgent(&tid, &attr, dummy_thread, NULL));
     }
 }
-} // namespace
 
-int main(int argc, char** argv) {
-    testing::InitGoogleTest(&argc, argv);
-    GFLAGS_NS::ParseCommandLineFlags(&argc, &argv, true);
-    return RUN_ALL_TESTS();
+static void* yield_thread(void*) {
+    bthread_yield();
+    return NULL;
 }
+
+TEST_F(BthreadTest, yield_single_thread) {
+    bthread_t tid;
+    ASSERT_EQ(0, bthread_start_background(&tid, NULL, yield_thread, NULL));
+    ASSERT_EQ(0, bthread_join(tid, NULL));
+}
+
+} // namespace

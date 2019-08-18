@@ -1,16 +1,19 @@
-// Copyright (c) 2015 Baidu, Inc.
-// 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-// 
-//     http://www.apache.org/licenses/LICENSE-2.0
-// 
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 // Authors: Ge,Jun (gejun@baidu.com)
 
@@ -21,6 +24,7 @@
 #include "butil/strings/string_piece.h"   // butil::StringPiece
 #include "butil/arena.h"                  // butil::Arena
 #include "butil/logging.h"                // CHECK
+#include "parse_result.h"                 // ParseError
 
 
 namespace brpc {
@@ -79,14 +83,16 @@ public:
 
     // Parse from `buf' which may be incomplete and allocate needed memory
     // on `arena'.
-    // Returns true when an intact reply is parsed and cut off from `buf',
-    // false otherwise and `buf' is guaranteed to be UNCHANGED so that you
-    // can call this function on a RedisReply object with the same buf again
-    // and again until the function returns true. This property makes sure
-    // the parsing of RedisReply in the worst case is O(N) where N is size
-    // of the on-wire reply. As a contrast, if the parsing needs `buf' to be
-    // intact, the complexity in worst case may be O(N^2).
-    bool ConsumePartialIOBuf(butil::IOBuf& buf, butil::Arena* arena);
+    // Returns PARSE_OK when an intact reply is parsed and cut off from `buf'.
+    // Returns PARSE_ERROR_NOT_ENOUGH_DATA if data in `buf' is not enough to parse,
+    // and `buf' is guaranteed to be UNCHANGED so that you can call this
+    // function on a RedisReply object with the same buf again and again until
+    // the function returns PARSE_OK. This property makes sure the parsing of
+    // RedisReply in the worst case is O(N) where N is size of the on-wire
+    // reply. As a contrast, if the parsing needs `buf' to be intact,
+    // the complexity in worst case may be O(N^2).
+    // Returns PARSE_ERROR_ABSOLUTELY_WRONG if the parsing failed.
+    ParseError ConsumePartialIOBuf(butil::IOBuf& buf, butil::Arena* arena);
 
     // Swap internal fields with another reply.
     void Swap(RedisReply& other);
@@ -97,9 +103,17 @@ public:
     // Print fields into ostream
     void Print(std::ostream& os) const;
 
+    // Copy from another reply allocating on a different Arena, and allocate
+    // required memory with `self_arena'.
+    void CopyFromDifferentArena(const RedisReply& other,
+                                butil::Arena* self_arena);
+
+    // Copy from another reply allocating on a same Arena.
+    void CopyFromSameArena(const RedisReply& other);
+
 private:
-    // RedisReply does not own the memory (pointed by internal pointers),
-    // Copying is extremely dangerous and must be disabled.
+    // RedisReply does not own the memory of fields, copying must be done
+    // by calling CopyFrom[Different|Same]Arena.
     DISALLOW_COPY_AND_ASSIGN(RedisReply);
     
     RedisReplyType _type;
@@ -211,7 +225,13 @@ inline void RedisReply::Clear() {
     _data.array.replies = NULL;
 }
 
-} // namespace brpc
+inline void RedisReply::CopyFromSameArena(const RedisReply& other) {
+    _type = other._type;
+    _length = other._length;
+    _data.padding[0] = other._data.padding[0];
+    _data.padding[1] = other._data.padding[1];
+}
 
+} // namespace brpc
 
 #endif  // BRPC_REDIS_H

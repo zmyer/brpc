@@ -1,16 +1,19 @@
-// Copyright (c) 2015 Baidu, Inc.
-// 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-// 
-//     http://www.apache.org/licenses/LICENSE-2.0
-// 
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 // Authors: Ge,Jun (gejun@baidu.com)
 
@@ -37,7 +40,7 @@ DECLARE_bool(enable_rpcz);
 namespace policy {
 
 DEFINE_bool(redis_verbose, false,
-            "[DEBUG] Print EVERY redis request/response to stderr");
+            "[DEBUG] Print EVERY redis request/response");
 
 struct InputResponse : public InputMessageBase {
     bthread_id_t id_wait;
@@ -69,20 +72,44 @@ ParseResult ParseRedisMessage(butil::IOBuf* source, Socket* socket,
         LOG(WARNING) << "No corresponding PipelinedInfo in socket";
         return MakeParseError(PARSE_ERROR_TRY_OTHERS);
     }
-    InputResponse* msg = static_cast<InputResponse*>(socket->parsing_context());
-    if (msg == NULL) {
-        msg = new InputResponse;
-        socket->reset_parsing_context(msg);
-    }
 
-    if (!msg->response.ConsumePartialIOBuf(*source, pi.count)) {
-        socket->GivebackPipelinedInfo(pi);
-        return MakeParseError(PARSE_ERROR_NOT_ENOUGH_DATA);
-    }
-    CHECK_EQ((uint32_t)msg->response.reply_size(), pi.count);
-    msg->id_wait = pi.id_wait;
-    socket->release_parsing_context();
-    return MakeMessage(msg);
+    do {
+        InputResponse* msg = static_cast<InputResponse*>(socket->parsing_context());
+        if (msg == NULL) {
+            msg = new InputResponse;
+            socket->reset_parsing_context(msg);
+        }
+
+        const int consume_count = (pi.with_auth ? 1 : pi.count);
+
+        ParseError err = msg->response.ConsumePartialIOBuf(*source, consume_count);
+        if (err != PARSE_OK) {
+            socket->GivebackPipelinedInfo(pi);
+            return MakeParseError(err);
+        }
+
+        if (pi.with_auth) {
+            if (msg->response.reply_size() != 1 ||
+                !(msg->response.reply(0).type() == brpc::REDIS_REPLY_STATUS &&
+                  msg->response.reply(0).data().compare("OK") == 0)) {
+                LOG(ERROR) << "Redis Auth failed: " << msg->response;
+                return MakeParseError(PARSE_ERROR_NO_RESOURCE,
+                                      "Fail to authenticate with Redis");
+            }
+
+            DestroyingPtr<InputResponse> auth_msg(
+                 static_cast<InputResponse*>(socket->release_parsing_context()));
+            pi.with_auth = false;
+            continue;
+        }
+
+        CHECK_EQ((uint32_t)msg->response.reply_size(), pi.count);
+        msg->id_wait = pi.id_wait;
+        socket->release_parsing_context();
+        return MakeMessage(msg);
+    } while(true);
+
+    return MakeParseError(PARSE_ERROR_ABSOLUTELY_WRONG);
 }
 
 void ProcessRedisResponse(InputMessageBase* msg_base) {
@@ -97,7 +124,7 @@ void ProcessRedisResponse(InputMessageBase* msg_base) {
             << "Fail to lock correlation_id=" << cid << ": " << berror(rc);
         return;
     }
-    
+
     ControllerPrivateAccessor accessor(cntl);
     Span* span = accessor.span();
     if (span) {
@@ -119,13 +146,12 @@ void ProcessRedisResponse(InputMessageBase* msg_base) {
             }
             ((RedisResponse*)cntl->response())->Swap(&msg->response);
             if (FLAGS_redis_verbose) {
-                std::cerr << "[REDIS RESPONSE] "
-                          << *((RedisResponse*)cntl->response())
-                          << std::endl;
+                LOG(INFO) << "\n[REDIS RESPONSE] "
+                          << *((RedisResponse*)cntl->response());
             }
         }
     } // silently ignore the response.
-    
+
     // Unlocks correlation_id inside. Revert controller's
     // error code if it version check of `cid' fails
     msg.reset();  // optional, just release resourse ASAP
@@ -148,7 +174,7 @@ void SerializeRedisRequest(butil::IOBuf* buf,
     }
     ControllerPrivateAccessor(cntl).set_pipelined_count(rr->command_size());
     if (FLAGS_redis_verbose) {
-        std::cerr << "[REDIS REQUEST] " << *rr << std::endl;
+        LOG(INFO) << "\n[REDIS REQUEST] " << *rr;
     }
 }
 
@@ -156,9 +182,18 @@ void PackRedisRequest(butil::IOBuf* buf,
                       SocketMessage**,
                       uint64_t /*correlation_id*/,
                       const google::protobuf::MethodDescriptor*,
-                      Controller*,
+                      Controller* cntl,
                       const butil::IOBuf& request,
-                      const Authenticator* /*auth*/) {
+                      const Authenticator* auth) {
+    if (auth) {
+        std::string auth_str;
+        if (auth->GenerateCredential(&auth_str) != 0) {
+            return cntl->SetFailed(EREQUEST, "Fail to generate credential");
+        }
+        buf->append(auth_str);
+        ControllerPrivateAccessor(cntl).add_with_auth();
+    }
+
     buf->append(request);
 }
 
